@@ -11,8 +11,8 @@ require 'nnx'
 require 'optim'
 require 'image'
 require 'dataset-mnist'
-require 'pl'
 require 'paths'
+lapp = require 'pl.lapp'
 
 ----------------------------------------------------------------------
 -- parse command-line options
@@ -20,7 +20,7 @@ require 'paths'
 local opt = lapp[[
    -s,--save          (default "logs")      subdirectory to save logs
    -n,--network       (default "")          reload pretrained network
-   -m,--model         (default "convnet")   type of model tor train: convnet | mlp | linear
+   -m,--model         (default "convnet")   type of model tor train: convnet | mlp
    -f,--full                                use the full dataset
    -p,--plot                                plot while training
    -r,--learningRate  (default 0.05)        learning rate
@@ -80,15 +80,6 @@ if opt.network == '' then
       model:add(nn.Tanh())
       model:add(nn.Linear(2048,#classes))
       ------------------------------------------------------------
-
-   elseif opt.model == 'linear' then
-      ------------------------------------------------------------
-      -- simple linear model: logistic regression
-      ------------------------------------------------------------
-      model:add(nn.Reshape(1024))
-      model:add(nn.Linear(1024,#classes))
-      ------------------------------------------------------------
-
    else
       print('Unknown model type')
       cmd:text()
