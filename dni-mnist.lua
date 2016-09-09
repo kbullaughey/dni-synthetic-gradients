@@ -52,7 +52,7 @@ geometry = {32,32}
 -- predictions - prediction using the activations and errors fed back into the
 --               synth
 activations1 = nn.Sequential()
-synth1 = nn.Sequential()
+synthetic1 = nn.Sequential()
 predictions = nn.Sequential()
 
 ------------------------------------------------------------
@@ -64,10 +64,10 @@ activations1:add(nn.Linear(1024, 256))
 activations1:add(nn.BatchNormalization(256, nil, nil, false))
 activations1:add(nn.ReLU())
 -- Synthetic gradients
-synth1:add(nn.Linear(256,1024))
-synth1:add(nn.BatchNormalization(1024, nil, nil, false))
-synth1:add(nn.ReLU())
-synth1:add(nn.Linear(1024,256))
+synthetic1:add(nn.Linear(256,1024))
+synthetic1:add(nn.BatchNormalization(1024, nil, nil, false))
+synthetic1:add(nn.ReLU())
+synthetic1:add(nn.Linear(1024,256))
 -- Predictions
 predictions:add(nn.Linear(256,#classes))
 predictions:add(nn.LogSoftMax())
@@ -75,12 +75,12 @@ predictions:add(nn.LogSoftMax())
 
 -- retrieve parameters and gradients
 activations1Par, activations1GradPar = activations1:getParameters()
-synth1Par, synth1GradPar = synth1:getParameters()
+synthetic1Par, synthetic1GradPar = synthetic1:getParameters()
 predictionsPar, predictionsGradPar = predictions:getParameters()
 
 -- Initialize parameters
 activations1Par:uniform(-0.05, 0.05)
-synth1Par:zero()
+synthetic1Par:zero()
 predictionsPar:uniform(-0.05, 0.05)
 
 ----------------------------------------------------------------------
@@ -181,7 +181,7 @@ end
 -- training function
 function train(dataset)
    activations1:training()
-   synth1:training()
+   synthetic1:training()
    predictions:training()
 
    -- epoch tracker
@@ -215,9 +215,9 @@ function train(dataset)
         activations = activations1,
         activationsPar = activations1Par,
         activationsGradPar = activations1GradPar,
-        synthetic = synth1,
-        syntheticPar = synth1Par,
-        syntheticGradPar = synth1GradPar,
+        synthetic = synthetic1,
+        syntheticPar = synthetic1Par,
+        syntheticGradPar = synthetic1GradPar,
         inputs = inputs,
       }
       local finalStage = stage1
@@ -260,7 +260,7 @@ function train(dataset)
        -- Perform SGD steps for each of our models:
        optim.sgd(fEvalActivations1, activations1Par, sgdState1)
        optim.sgd(fEvalPredictions, predictionsPar, sgdState2)
-       optim.sgd(fEvalSynthetic1, synth1Par, sgdState3)
+       optim.sgd(fEvalSynthetic1, synthetic1Par, sgdState3)
     
        -- disp progress
        xlua.progress(t, dataset:size())
@@ -292,7 +292,7 @@ end
 -- test function
 function test(dataset)
    activations1:evaluate()
-   synth1:evaluate()
+   synthetic1:evaluate()
    predictions:evaluate()
 
    -- local vars
