@@ -22,7 +22,6 @@ local opt = lapp[[
    -r,--learningRate  (default 0.05)        learning rate
    -b,--batchSize     (default 10)          batch size
    -m,--momentum      (default 0)           momentum
-   --coefL1           (default 0)           L1 penalty on the weights
    --coefL2           (default 0)           L2 penalty on the weights
    -t,--threads       (default 4)           number of threads
 ]]
@@ -153,19 +152,6 @@ function train(dataset)
          local df_do = criterion:backward(outputs, targets)
          model:backward(inputs, df_do)
 
-         -- penalties (L1 and L2):
-         if opt.coefL1 ~= 0 or opt.coefL2 ~= 0 then
-            -- locals:
-            local norm,sign= torch.norm,torch.sign
-
-            -- Loss:
-            f = f + opt.coefL1 * norm(parameters,1)
-            f = f + opt.coefL2 * norm(parameters,2)^2/2
-
-            -- Gradients:
-            gradParameters:add( sign(parameters):mul(opt.coefL1) + parameters:clone():mul(opt.coefL2) )
-         end
-
          -- update confusion
          for i = 1,opt.batchSize do
             confusion:add(outputs[i], targets[i])
@@ -179,7 +165,8 @@ function train(dataset)
       sgdState = sgdState or {
          learningRate = opt.learningRate,
          momentum = opt.momentum,
-         learningRateDecay = 5e-7
+         learningRateDecay = 5e-7,
+         weightDecayDecay = opt.coefL2,
       }
       optim.sgd(feval, parameters, sgdState)
    
