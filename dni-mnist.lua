@@ -25,7 +25,7 @@ local opt = lapp[[
    -p,--plot                                plot while training
    -r,--learningRate  (default 0.05)        learning rate
    -b,--batchSize     (default 10)          batch size
-   -m,--momentum      (default 0)           momentum
+   -M,--momentum      (default 0)           momentum
    --coefL2           (default 0)           L2 penalty on the weights
    -t,--threads       (default 4)           number of threads
 ]]
@@ -35,7 +35,7 @@ torch.manualSeed(1)
 
 -- threads
 torch.setnumthreads(opt.threads)
-print('<torch> set nb of threads to ' .. torch.getnumthreads())
+print('<torch> trying to set ' .. opt.threads .. ' threads, got ' .. torch.getnumthreads())
 
 torch.setdefaulttensortype('torch.FloatTensor')
 
@@ -49,8 +49,14 @@ classes = {'1','2','3','4','5','6','7','8','9','10'}
 geometry = {32,32}
 
 if opt.network == '' then
-   -- define model to train
-   model = nn.Sequential()
+   -- In order to update-unlock the model, we define it as separate pieces.
+   -- activations - layer-1 activations
+   -- synthetic   - synthtic gradient prediction
+   -- predictions - prediction using the activations and errors fed back into the
+   --               synth
+   activations = nn.Sequential()
+   synthetic = nn.Sequential()
+   predictions = nn.Sequential()
 
    if opt.model == 'convnet' then
       ------------------------------------------------------------
@@ -70,15 +76,19 @@ if opt.network == '' then
       model:add(nn.Tanh())
       model:add(nn.Linear(200, #classes))
       ------------------------------------------------------------
-
    elseif opt.model == 'mlp' then
       ------------------------------------------------------------
-      -- regular 2-layer MLP
+      -- 2-layer MLP (1 hidden layer)
       ------------------------------------------------------------
-      model:add(nn.Reshape(1024))
-      model:add(nn.Linear(1024, 2048))
-      model:add(nn.Tanh())
-      model:add(nn.Linear(2048,#classes))
+      -- Activations
+      activations:add(nn.Reshape(1024))
+      activations:add(nn.Linear(1024, 1024))
+      activations:add(nn.Tanh())
+      -- Synthetic gradients
+      synthetic:add(nn.Linear(1024,1024))
+      -- Predictions
+      predictions:add(nn.Linear(1024,#classes))
+      predictions:add(nn.LogSoftMax())
       ------------------------------------------------------------
    else
       print('Unknown model type')
@@ -91,17 +101,21 @@ else
 end
 
 -- retrieve parameters and gradients
-parameters,gradParameters = model:getParameters()
+activationsPar, activationsGradPar = activations:getParameters()
+syntheticPar, syntheticGradPar = synthetic:getParameters()
+predictionsPar, predictionsGradPar = predictions:getParameters()
 
--- verbose
-print('<mnist> using model:')
-print(model)
+-- Initialize parameters
+activationsPar:uniform(-0.05, 0.05)
+syntheticPar:zero()
+predictionsPar:uniform(-0.05, 0.05)
 
 ----------------------------------------------------------------------
--- loss function: negative log-likelihood
+-- We use a negative log likelihood criterion for classification model
+-- and a MSE criterion for synthetic gradients model.
 --
-model:add(nn.LogSoftMax())
-criterion = nn.ClassNLLCriterion()
+classificationCriterion = nn.ClassNLLCriterion()
+syntheticCriterion = nn.MSECriterion()
 
 ----------------------------------------------------------------------
 -- get/create dataset
@@ -146,6 +160,7 @@ function train(dataset)
    print('<trainer> on training set:')
    print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ']')
    for t = 1,dataset:size(),opt.batchSize do
+      collectgarbage()
       -- create mini batch
       local inputs = torch.Tensor(opt.batchSize,1,geometry[1],geometry[2])
       local targets = torch.Tensor(opt.batchSize)
@@ -161,36 +176,51 @@ function train(dataset)
          k = k + 1
       end
 
-      -- create closure to evaluate f(X) and df/dX
-      local feval = function(x)
-         -- just in case:
-         collectgarbage()
+      -- Make some variables that we'll use to capture computations from the
+      -- closures.
+      local act -- activations
+      local syn -- synthetic gradients
+      local grad -- actual gradients
 
-         -- get new parameters
-         if x ~= parameters then
-            parameters:copy(x)
+      -- Create closure to evaluate f(W) and df/dW of the activations model using
+      -- the synthetic gradient model. Here w is the parameters of the activations
+      -- model.
+      local fevalActivations = function(w)
+         -- w is probably already our parameter vector, but if not stick it in.
+         if w ~= activationsPar then
+            activationsPar:copy(w)
          end
-
-         -- reset gradients
-         gradParameters:zero()
+         activationsGradPar:zero()
 
          -- evaluate function for complete mini batch
-         local outputs = model:forward(inputs)
-         local f = criterion:forward(outputs, targets)
+         act = activations:forward(inputs)
+         -- use the synthetic gradients model to approximate df_do
+         syn = synthetic:forward(act)
+         -- No update locking, we can immediately use our synthetic gradients to 
+         -- run this module backward.
+         activations:backward(inputs, syn)
+
+         return act, activationsGradPar
+      end
+
+      -- Create closure to evaluate f(W) and df/dW of the Prediction model.
+      -- Here w is the parameters of the prediction model.
+      local fevalPredictions = function(w)
+         -- get new parameters
+         if w ~= predictionsPar then
+            predictionsPar:copy(w)
+         end
+         predictionsGradPar:zero()
+
+         -- Compute loss
+         local outputs = predictions:forward(act)
+         local f = classificationCriterion:forward(outputs, targets)
 
          -- estimate df/dW
-         local df_do = criterion:backward(outputs, targets)
-         model:backward(inputs, df_do)
-
-         -- penalties (L2):
-         if opt.coefL2 ~= 0 then
-            -- locals:
-            local norm,sign= torch.norm,torch.sign
-            -- Loss:
-            f = f + opt.coefL2 * norm(parameters,2)^2/2
-            -- Gradients:
-            gradParameters:add(parameters:clone():mul(opt.coefL2))
-         end
+         local df_do = classificationCriterion:backward(outputs, targets)
+         -- Compute the actual gradient. This will be compared against the synthetic
+         -- gradient to update the model that outputs the synthetic gradients.
+         grad = predictions:backward(act, df_do)
 
          -- update confusion
          for i = 1,opt.batchSize do
@@ -198,16 +228,40 @@ function train(dataset)
          end
 
          -- return f and df/dX
-         return f,gradParameters
+         return f,predictionsGradPar
       end
 
-       -- Perform SGD step:
+      -- Create closure to evaluate f(W) and df/dW of the synthetic gradients model.
+      -- Here w is the parameters of the synthetic gradients model.
+      local fevalSynthetic = function(w)
+         -- get new parameters
+         if w ~= syntheticPar then
+            syntheticPar:copy(w)
+         end
+         syntheticGradPar:zero()
+
+         -- We've already run model 'synthetic' forward, when we produced the synthetic
+         -- gradients that we used to update the 'activations' model, so we can go right
+         -- to the criterion.
+         -- Compute a loss comparing our synthetic gradient and the real gradient.
+         local synLoss = syntheticCriterion:forward(syn, grad)
+         local synLossGrad = syntheticCriterion:backward(syn, grad)
+         synthetic:backward(act, synLossGrad)
+
+         -- return f and df/dX
+         return synLoss,syntheticGradPar
+      end
+
+       -- Perform SGD steps for each of our models:
        sgdState = sgdState or {
           learningRate = opt.learningRate,
           momentum = opt.momentum,
-          learningRateDecay = 5e-7
+          learningRateDecay = 5e-7,
+          weightDecay = opt.coefL2,
        }
-       optim.sgd(feval, parameters, sgdState)
+       optim.sgd(fevalActivations, activationsPar, sgdState)
+       optim.sgd(fevalPredictions, predictionsPar, sgdState)
+       optim.sgd(fevalSynthetic, syntheticPar, sgdState)
     
        -- disp progress
        xlua.progress(t, dataset:size())
@@ -244,6 +298,7 @@ function test(dataset)
    -- test over given dataset
    print('<trainer> on testing Set:')
    for t = 1,dataset:size(),opt.batchSize do
+      collectgarbage()
       -- disp progress
       xlua.progress(t, dataset:size())
 
@@ -263,7 +318,8 @@ function test(dataset)
       end
 
       -- test samples
-      local preds = model:forward(inputs)
+      local a = activations:forward(inputs)
+      local preds = predictions:forward(a)
 
       -- confusion:
       for i = 1,opt.batchSize do
