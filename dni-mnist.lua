@@ -19,13 +19,11 @@ lapp = require 'pl.lapp'
 --
 local opt = lapp[[
    -s,--save          (default "logs")      subdirectory to save logs
-   -n,--network       (default "")          reload pretrained network
-   -m,--model         (default "convnet")   type of model tor train: convnet | mlp
    -f,--full                                use the full dataset
    -p,--plot                                plot while training
    -r,--learningRate  (default 0.05)        learning rate
    -b,--batchSize     (default 10)          batch size
-   -M,--momentum      (default 0)           momentum
+   -m,--momentum      (default 0)           momentum
    --coefL2           (default 0)           L2 penalty on the weights
    -t,--threads       (default 4)           number of threads
 ]]
@@ -48,66 +46,41 @@ classes = {'1','2','3','4','5','6','7','8','9','10'}
 -- geometry: width and height of input images
 geometry = {32,32}
 
-if opt.network == '' then
-   -- In order to update-unlock the model, we define it as separate pieces.
-   -- activations - layer-1 activations
-   -- synthetic   - synthtic gradient prediction
-   -- predictions - prediction using the activations and errors fed back into the
-   --               synth
-   activations = nn.Sequential()
-   synthetic = nn.Sequential()
-   predictions = nn.Sequential()
+-- In order to update-unlock the model, we define it as separate pieces.
+-- activations - layer-1 activations
+-- synthetic   - synthtic gradient prediction
+-- predictions - prediction using the activations and errors fed back into the
+--               synth
+activations1 = nn.Sequential()
+synth1 = nn.Sequential()
+predictions = nn.Sequential()
 
-   if opt.model == 'convnet' then
-      ------------------------------------------------------------
-      -- convolutional network 
-      ------------------------------------------------------------
-      -- stage 1 : mean suppresion -> filter bank -> squashing -> max pooling
-      model:add(nn.SpatialConvolutionMM(1, 32, 5, 5))
-      model:add(nn.Tanh())
-      model:add(nn.SpatialMaxPooling(3, 3, 3, 3, 1, 1))
-      -- stage 2 : mean suppresion -> filter bank -> squashing -> max pooling
-      model:add(nn.SpatialConvolutionMM(32, 64, 5, 5))
-      model:add(nn.Tanh())
-      model:add(nn.SpatialMaxPooling(2, 2, 2, 2))
-      -- stage 3 : standard 2-layer MLP:
-      model:add(nn.Reshape(64*3*3))
-      model:add(nn.Linear(64*3*3, 200))
-      model:add(nn.Tanh())
-      model:add(nn.Linear(200, #classes))
-      ------------------------------------------------------------
-   elseif opt.model == 'mlp' then
-      ------------------------------------------------------------
-      -- 2-layer MLP (1 hidden layer)
-      ------------------------------------------------------------
-      -- Activations
-      activations:add(nn.Reshape(1024))
-      activations:add(nn.Linear(1024, 1024))
-      activations:add(nn.Tanh())
-      -- Synthetic gradients
-      synthetic:add(nn.Linear(1024,1024))
-      -- Predictions
-      predictions:add(nn.Linear(1024,#classes))
-      predictions:add(nn.LogSoftMax())
-      ------------------------------------------------------------
-   else
-      print('Unknown model type')
-      cmd:text()
-      error()
-   end
-else
-   print('<trainer> reloading previously trained network')
-   model = torch.load(opt.network)
-end
+------------------------------------------------------------
+-- 2-layer MLP (1 hidden layer)
+------------------------------------------------------------
+-- Activations
+activations1:add(nn.Reshape(1024))
+activations1:add(nn.Linear(1024, 256))
+activations1:add(nn.BatchNormalization(256, nil, nil, false))
+activations1:add(nn.ReLU())
+-- Synthetic gradients
+synth1:add(nn.Linear(256,1024))
+synth1:add(nn.BatchNormalization(1024, nil, nil, false))
+synth1:add(nn.ReLU())
+synth1:add(nn.Linear(1024,256))
+-- Predictions
+predictions:add(nn.Linear(256,#classes))
+predictions:add(nn.LogSoftMax())
+------------------------------------------------------------
 
 -- retrieve parameters and gradients
-activationsPar, activationsGradPar = activations:getParameters()
-syntheticPar, syntheticGradPar = synthetic:getParameters()
+activations1Par, activations1GradPar = activations1:getParameters()
+synth1Par, synth1GradPar = synth1:getParameters()
 predictionsPar, predictionsGradPar = predictions:getParameters()
 
 -- Initialize parameters
-activationsPar:uniform(-0.05, 0.05)
-syntheticPar:zero()
+activations1Par:uniform(-0.05, 0.05)
+synth1Par:zero()
 predictionsPar:uniform(-0.05, 0.05)
 
 ----------------------------------------------------------------------
@@ -148,8 +121,69 @@ confusion = optim.ConfusionMatrix(classes)
 trainLogger = optim.Logger(paths.concat(opt.save, 'train.log'))
 testLogger = optim.Logger(paths.concat(opt.save, 'test.log'))
 
+function newSGD()
+  return {
+    learningRate = opt.learningRate,
+    momentum = opt.momentum,
+    learningRateDecay = 5e-7,
+    weightDecay = opt.coefL2,
+  }
+end
+
+-- Create closure to evaluate f(W) and df/dW of the activations model using
+-- the synthetic gradient model. Here w is the parameters of the activations
+-- model.
+function makeActivationsClosure(this)
+  local e = function(w)
+     -- w is probably already our parameter vector, but if not stick it in.
+     if w ~= this.activationsPar then
+        this.activationsPar:copy(w)
+     end
+     this.activationsGradPar:zero()
+
+     -- evaluate function for complete mini batch
+     this.act = this.activations:forward(this.inputs)
+     -- use the synthetic gradients model to approximate df_do
+     this.syn = this.synthetic:forward(this.act)
+     -- No update locking, we can immediately use our synthetic gradients to 
+     -- run this module backward.
+     this.activations:backward(this.inputs, this.syn)
+
+     return this.act, this.activationsGradPar
+  end
+  return e
+end
+
+-- Create closure to evaluate f(W) and df/dW of the synthetic gradients model.
+-- Here w is the parameters of the synthetic gradients model.
+function makeSyntheticGradientClosure(this)
+  local e = function(w)
+     -- get new parameters
+     if w ~= this.syntheticPar then
+        this.syntheticPar:copy(w)
+     end
+     this.syntheticGradPar:zero()
+
+     -- We've already run model 'synthetic' forward, when we produced the synthetic
+     -- gradients that we used to update the 'activations' model, so we can go right
+     -- to the criterion.
+     -- Compute a loss comparing our synthetic gradient and the real gradient.
+     local synLoss = syntheticCriterion:forward(this.syn, this.grad)
+     local synLossGrad = syntheticCriterion:backward(this.syn, this.grad)
+     this.synthetic:backward(this.act, synLossGrad)
+
+     -- return f and df/dX
+     return synLoss, this.syntheticGradPar
+  end
+  return e
+end
+
 -- training function
 function train(dataset)
+   activations1:training()
+   synth1:training()
+   predictions:training()
+
    -- epoch tracker
    epoch = epoch or 1
 
@@ -176,36 +210,24 @@ function train(dataset)
          k = k + 1
       end
 
-      -- Make some variables that we'll use to capture computations from the
-      -- closures.
-      local act -- activations
-      local syn -- synthetic gradients
-      local grad -- actual gradients
+      -- Make some variables that we'll use to capture computations from the closures.
+      local stage1 = {
+        activations = activations1,
+        activationsPar = activations1Par,
+        activationsGradPar = activations1GradPar,
+        synthetic = synth1,
+        syntheticPar = synth1Par,
+        syntheticGradPar = synth1GradPar,
+        inputs = inputs,
+      }
+      local finalStage = stage1
 
-      -- Create closure to evaluate f(W) and df/dW of the activations model using
-      -- the synthetic gradient model. Here w is the parameters of the activations
-      -- model.
-      local fevalActivations = function(w)
-         -- w is probably already our parameter vector, but if not stick it in.
-         if w ~= activationsPar then
-            activationsPar:copy(w)
-         end
-         activationsGradPar:zero()
-
-         -- evaluate function for complete mini batch
-         act = activations:forward(inputs)
-         -- use the synthetic gradients model to approximate df_do
-         syn = synthetic:forward(act)
-         -- No update locking, we can immediately use our synthetic gradients to 
-         -- run this module backward.
-         activations:backward(inputs, syn)
-
-         return act, activationsGradPar
-      end
+      local fEvalActivations1 = makeActivationsClosure(stage1)
+      local fEvalSynthetic1 = makeSyntheticGradientClosure(stage1)
 
       -- Create closure to evaluate f(W) and df/dW of the Prediction model.
       -- Here w is the parameters of the prediction model.
-      local fevalPredictions = function(w)
+      local fEvalPredictions = function(w)
          -- get new parameters
          if w ~= predictionsPar then
             predictionsPar:copy(w)
@@ -213,14 +235,14 @@ function train(dataset)
          predictionsGradPar:zero()
 
          -- Compute loss
-         local outputs = predictions:forward(act)
+         local outputs = predictions:forward(finalStage.act)
          local f = classificationCriterion:forward(outputs, targets)
 
          -- estimate df/dW
          local df_do = classificationCriterion:backward(outputs, targets)
          -- Compute the actual gradient. This will be compared against the synthetic
          -- gradient to update the model that outputs the synthetic gradients.
-         grad = predictions:backward(act, df_do)
+         finalStage.grad = predictions:backward(finalStage.act, df_do)
 
          -- update confusion
          for i = 1,opt.batchSize do
@@ -231,37 +253,14 @@ function train(dataset)
          return f,predictionsGradPar
       end
 
-      -- Create closure to evaluate f(W) and df/dW of the synthetic gradients model.
-      -- Here w is the parameters of the synthetic gradients model.
-      local fevalSynthetic = function(w)
-         -- get new parameters
-         if w ~= syntheticPar then
-            syntheticPar:copy(w)
-         end
-         syntheticGradPar:zero()
-
-         -- We've already run model 'synthetic' forward, when we produced the synthetic
-         -- gradients that we used to update the 'activations' model, so we can go right
-         -- to the criterion.
-         -- Compute a loss comparing our synthetic gradient and the real gradient.
-         local synLoss = syntheticCriterion:forward(syn, grad)
-         local synLossGrad = syntheticCriterion:backward(syn, grad)
-         synthetic:backward(act, synLossGrad)
-
-         -- return f and df/dX
-         return synLoss,syntheticGradPar
-      end
+       sgdState1 = sgdState1 or newSGD()
+       sgdState2 = sgdState2 or newSGD()
+       sgdState3 = sgdState3 or newSGD()
 
        -- Perform SGD steps for each of our models:
-       sgdState = sgdState or {
-          learningRate = opt.learningRate,
-          momentum = opt.momentum,
-          learningRateDecay = 5e-7,
-          weightDecay = opt.coefL2,
-       }
-       optim.sgd(fevalActivations, activationsPar, sgdState)
-       optim.sgd(fevalPredictions, predictionsPar, sgdState)
-       optim.sgd(fevalSynthetic, syntheticPar, sgdState)
+       optim.sgd(fEvalActivations1, activations1Par, sgdState1)
+       optim.sgd(fEvalPredictions, predictionsPar, sgdState2)
+       optim.sgd(fEvalSynthetic1, synth1Par, sgdState3)
     
        -- disp progress
        xlua.progress(t, dataset:size())
@@ -292,6 +291,10 @@ end
 
 -- test function
 function test(dataset)
+   activations1:evaluate()
+   synth1:evaluate()
+   predictions:evaluate()
+
    -- local vars
    local time = sys.clock()
 
@@ -318,7 +321,7 @@ function test(dataset)
       end
 
       -- test samples
-      local a = activations:forward(inputs)
+      local a = activations1:forward(inputs)
       local preds = predictions:forward(a)
 
       -- confusion:
