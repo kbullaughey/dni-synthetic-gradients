@@ -57,37 +57,44 @@ synthetic1 = nn.Sequential()
 synthetic2 = nn.Sequential()
 predictions = nn.Sequential()
 
+-- Layer sizes. 
+l0H = 1024
+l1H = 256
+l2H = 256
+s1H = 1024
+s2H = 1024
+
 ------------------------------------------------------------
 -- 2 hidden layers
 ------------------------------------------------------------
 -- Activations
-activations1:add(nn.Reshape(1024))
-activations1:add(nn.Linear(1024, 256))
-activations1:add(nn.BatchNormalization(256, nil, nil, false))
+activations1:add(nn.Reshape(l0H))
+activations1:add(nn.Linear(l0H, l1H))
+activations1:add(nn.BatchNormalization(l1H, nil, nil, false))
 activations1:add(nn.ReLU())
-activations2:add(nn.Linear(256, 256))
-activations2:add(nn.BatchNormalization(256, nil, nil, false))
+activations2:add(nn.Linear(l1H, l2H))
+activations2:add(nn.BatchNormalization(l2H, nil, nil, false))
 activations2:add(nn.ReLU())
 -- Synthetic gradients for layer 1
-synthetic1:add(nn.Linear(256,1024))
-synthetic1:add(nn.BatchNormalization(1024, nil, nil, false))
+synthetic1:add(nn.Linear(l1H,s1H))
+synthetic1:add(nn.BatchNormalization(s1H, nil, nil, false))
 synthetic1:add(nn.ReLU())
-synthetic1:add(nn.Linear(1024,1024))
-synthetic1:add(nn.BatchNormalization(1024, nil, nil, false))
+synthetic1:add(nn.Linear(s1H,s1H))
+synthetic1:add(nn.BatchNormalization(s1H, nil, nil, false))
 synthetic1:add(nn.ReLU())
-synth1Pred = nn.Linear(1024,256)
+synth1Pred = nn.Linear(s1H,l1H)
 synthetic1:add(synth1Pred)
 -- Synthetic gradients for layer 2
-synthetic2:add(nn.Linear(256,1024))
-synthetic2:add(nn.BatchNormalization(1024, nil, nil, false))
+synthetic2:add(nn.Linear(l2H,s2H))
+synthetic2:add(nn.BatchNormalization(s2H, nil, nil, false))
 synthetic2:add(nn.ReLU())
-synthetic2:add(nn.Linear(1024,1024))
-synthetic2:add(nn.BatchNormalization(1024, nil, nil, false))
+synthetic2:add(nn.Linear(s2H,s2H))
+synthetic2:add(nn.BatchNormalization(s2H, nil, nil, false))
 synthetic2:add(nn.ReLU())
-synth2Pred = nn.Linear(1024,256)
+synth2Pred = nn.Linear(s2H,l2H)
 synthetic2:add(synth2Pred)
 -- Predictions
-predictions:add(nn.Linear(256,#classes))
+predictions:add(nn.Linear(l2H,#classes))
 predictions:add(nn.LogSoftMax())
 ------------------------------------------------------------
 
@@ -170,12 +177,35 @@ function makeActivationsClosure(this)
     -- Use the activations from the layer below to compute the activations of this layer.
     this.act = this.activations:forward(this.below.act)
     -- use the synthetic gradients model to approximate df_do
-    this.syn = this.synthetic:forward(this.act)
+    this.synGrad = this.synthetic:forward(this.act)
     -- No update locking, we can immediately use our synthetic gradients to 
     -- run this module backward.
-    this.activations:backward(this.below.act, this.syn)
+    this.below.bpGrad = this.activations:backward(this.below.act, this.synGrad)
 
     return this.act, this.activationsGradPar
+  end
+end
+
+-- Create closure to evaluate f(W) and df/dW of the synthetic gradients model.
+-- Here w is the parameters of the synthetic gradients model.
+function makeSyntheticGradientClosure(this)
+  return function(w)
+    -- get new parameters
+    if w ~= this.syntheticPar then
+      this.syntheticPar:copy(w)
+    end
+    this.syntheticGradPar:zero()
+
+    -- We've already run model 'synthetic' forward, when we produced the synthetic
+    -- gradients that we used to update the 'activations' model, so we can go right
+    -- to the criterion.
+    -- Compute a loss comparing our synthetic gradient and the real gradient.
+    local synLoss = syntheticCriterion:forward(this.synGrad, this.bpGrad)
+    local synLossGrad = syntheticCriterion:backward(this.synGrad, this.bpGrad)
+    this.synthetic:backward(this.act, synLossGrad)
+
+    -- return f and df/dX
+    return synLoss, this.syntheticGradPar
   end
 end
 
@@ -197,7 +227,7 @@ function makePredictionsClosure(this)
     local df_do = classificationCriterion:backward(outputs, this.targets)
     -- Compute the actual gradient. This will be compared against the synthetic
     -- gradient to update the model that outputs the synthetic gradients.
-    this.below.grad = this.predictions:backward(this.below.act, df_do):clone()
+    this.below.bpGrad = this.predictions:backward(this.below.act, df_do):clone()
 
     -- update confusion
     for i = 1,opt.batchSize do
@@ -206,33 +236,6 @@ function makePredictionsClosure(this)
 
     -- return f and df/dX
     return f, this.predictionsGradPar
-  end
-end
-
--- Create closure to evaluate f(W) and df/dW of the synthetic gradients model.
--- Here w is the parameters of the synthetic gradients model.
-function makeSyntheticGradientClosure(this)
-  return function(w)
-    -- get new parameters
-    if w ~= this.syntheticPar then
-      this.syntheticPar:copy(w)
-    end
-    this.syntheticGradPar:zero()
-
-    -- We've already run model 'synthetic' forward, when we produced the synthetic
-    -- gradients that we used to update the 'activations' model, so we can go right
-    -- to the criterion.
-    -- Compute a loss comparing our synthetic gradient and the real gradient.
-    local synLoss = syntheticCriterion:forward(this.syn, this.grad)
-    local synLossGrad = syntheticCriterion:backward(this.syn, this.grad)
-    this.synthetic:backward(this.act, synLossGrad)
-
-    -- Compute the true gradient for the layer below.
-    this.activationsGradPar:zero()
-    this.below.grad = this.activations:backward(this.below.act, this.grad):clone()
-
-    -- return f and df/dX
-    return synLoss, this.syntheticGradPar
   end
 end
 
@@ -312,12 +315,17 @@ function train(dataset)
     sgdState4 = sgdState4 or newSGD()
     sgdState5 = sgdState5 or newSGD()
 
-    -- Perform SGD steps for each of our models:
+    -- Notation matching Figure 2 in DNI paper
+    -- update f_{i}
     optim.sgd(fEvalActivations1, activations1Par, sgdState1)
+    -- update f_{i+1}
     optim.sgd(fEvalActivations2, activations2Par, sgdState2)
-    optim.sgd(fEvalPredictions, predictionsPar, sgdState3)
-    optim.sgd(fEvalSynthetic2, synthetic2Par, sgdState4)
-    optim.sgd(fEvalSynthetic1, synthetic1Par, sgdState5)
+    -- update M_{i+1}
+    optim.sgd(fEvalSynthetic1, synthetic1Par, sgdState3)
+    -- update f_{i+2}
+    optim.sgd(fEvalPredictions, predictionsPar, sgdState4)
+    -- update M_{i+1}
+    optim.sgd(fEvalSynthetic2, synthetic2Par, sgdState5)
     
     -- disp progress
     xlua.progress(t, dataset:size())
