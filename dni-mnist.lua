@@ -67,11 +67,12 @@ s2H = 1024
 ------------------------------------------------------------
 -- 2 hidden layers
 ------------------------------------------------------------
--- Activations
+-- Activations for layer 1
 activations1:add(nn.Reshape(l0H))
 activations1:add(nn.Linear(l0H, l1H))
 activations1:add(nn.BatchNormalization(l1H, nil, nil, false))
 activations1:add(nn.ReLU())
+-- Activations for layer 2
 activations2:add(nn.Linear(l1H, l2H))
 activations2:add(nn.BatchNormalization(l2H, nil, nil, false))
 activations2:add(nn.ReLU())
@@ -158,7 +159,14 @@ function newSGD()
   return {
     learningRate = opt.learningRate,
     momentum = opt.momentum,
-    learningRateDecay = 5e-7,
+--    learningRateDecay = 5e-7,
+    weightDecay = opt.coefL2,
+  }
+end
+
+function newAdam()
+  return {
+    learningRate = opt.learningRate,
     weightDecay = opt.coefL2,
   }
 end
@@ -204,7 +212,7 @@ function makeSyntheticGradientClosure(this)
     local synLossGrad = syntheticCriterion:backward(this.synGrad, this.bpGrad)
     this.synthetic:backward(this.act, synLossGrad)
 
-    -- return f and df/dX
+    -- return f and df/dW
     return synLoss, this.syntheticGradPar
   end
 end
@@ -234,7 +242,7 @@ function makePredictionsClosure(this)
       confusion:add(outputs[i], this.targets[i])
     end
 
-    -- return f and df/dX
+    -- return f and df/dW
     return f, this.predictionsGradPar
   end
 end
@@ -256,6 +264,7 @@ function train(dataset)
   -- do one epoch
   print('<trainer> on training set:')
   print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ']')
+  local perm = torch.randperm(dataset:size())
   for t = 1,dataset:size(),opt.batchSize do
     collectgarbage()
     -- create mini batch
@@ -264,7 +273,7 @@ function train(dataset)
     local k = 1
     for i = t,math.min(t+opt.batchSize-1,dataset:size()) do
       -- load new sample
-      local sample = dataset[i]
+      local sample = dataset[perm[i]]
       local input = sample[1]:clone()
       local _,target = sample[2]:clone():max(1)
       target = target:squeeze()
@@ -309,23 +318,28 @@ function train(dataset)
     local fEvalSynthetic2 = makeSyntheticGradientClosure(layer2)
     local fEvalPredictions = makePredictionsClosure(layer3)
 
-    sgdState1 = sgdState1 or newSGD()
-    sgdState2 = sgdState2 or newSGD()
-    sgdState3 = sgdState3 or newSGD()
-    sgdState4 = sgdState4 or newSGD()
-    sgdState5 = sgdState5 or newSGD()
+    --local optimizer = optim.sgd
+    --local stateFactory = newSGD
+    local optimizer = optim.adam
+    local stateFactory = newAdam
+
+    optimState1 = optimState1 or stateFactory()
+    optimState2 = optimState2 or stateFactory()
+    optimState3 = optimState3 or stateFactory()
+    optimState4 = optimState4 or stateFactory()
+    optimState5 = optimState5 or stateFactory()
 
     -- Notation matching Figure 2 in DNI paper
     -- update f_{i}
-    optim.sgd(fEvalActivations1, activations1Par, sgdState1)
+    optimizer(fEvalActivations1, activations1Par, optimState1)
     -- update f_{i+1}
-    optim.sgd(fEvalActivations2, activations2Par, sgdState2)
+    optimizer(fEvalActivations2, activations2Par, optimState2)
     -- update M_{i+1}
-    optim.sgd(fEvalSynthetic1, synthetic1Par, sgdState3)
+    optimizer(fEvalSynthetic1, synthetic1Par, optimState3)
     -- update f_{i+2}
-    optim.sgd(fEvalPredictions, predictionsPar, sgdState4)
+    optimizer(fEvalPredictions, predictionsPar, optimState4)
     -- update M_{i+1}
-    optim.sgd(fEvalSynthetic2, synthetic2Par, sgdState5)
+    optimizer(fEvalSynthetic2, synthetic2Par, optimState5)
     
     -- disp progress
     xlua.progress(t, dataset:size())
