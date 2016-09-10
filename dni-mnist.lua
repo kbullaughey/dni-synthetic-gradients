@@ -96,7 +96,7 @@ if opt.condition then
   synth2Pred = nn.Linear(l2H+#classes,l2H)
 else
   -- Synthetic gradients for layer 1
-  synthetic1:add(nn.Linear(s1In,s1H))
+  synthetic1:add(nn.Linear(l1H,s1H))
   synthetic1:add(nn.BatchNormalization(s1H, nil, bnMomentum, false))
   synthetic1:add(nn.ReLU())
   synthetic1:add(nn.Linear(s1H,s1H))
@@ -104,7 +104,7 @@ else
   synthetic1:add(nn.ReLU())
   synth1Pred = nn.Linear(s1H,l1H)
   -- Synthetic gradients for layer 2
-  synthetic2:add(nn.Linear(s2In,s2H))
+  synthetic2:add(nn.Linear(l2H,s2H))
   synthetic2:add(nn.BatchNormalization(s2H, nil, bnMomentum, false))
   synthetic2:add(nn.ReLU())
   synthetic2:add(nn.Linear(s2H,s2H))
