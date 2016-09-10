@@ -81,7 +81,7 @@ Using a batch size of 250 and a learning rate of 0.0001:
 
 I only managed to reach an error rate of X% after Y epochs.
 
-The learning rate above (0.0001) is 3x the rate reported in the paper. But decreasing it didn't seem to help. It's worth noting that I was able to use a learning rate 10x higher yet (0.001) when conditioning on the labels (cDNI model). Such a high learning rate trained poorly for the unconditional model here. This probably relates to the very low amount of information in the synthetic gradients when not conditioning on the labels. My theory is that unconditional synthetic gradient model is tasked with making both a rough prediction of the class as well as modeling how the activations should be updated given this prediction. This seems like a lot to expect from the synthetic gradient neural net.
+The learning rate above (0.0001) is 3x the rate reported in the paper. But decreasing it didn't seem to help. It's worth noting that I was able to use a learning rate 10x higher yet (0.001) when conditioning on the labels (cDNI model). Such a high learning rate trained poorly for the unconditional model here. This probably relates to the very low amount of information in the synthetic gradients when not conditioning on the labels. My theory is that the unconditional synthetic gradient model is tasked with making both a rough prediction of the class as well as modeling how the activations should be updated given this prediction. This seems like a lot to expect from the synthetic gradient neural net.
 
 ### cDNI model
 
@@ -90,13 +90,19 @@ Thus, in addition to the activations (or inputs) from the layer below, the synth
 
 I follow the suggestion in the paper that a simple linear transform was all that is needed to estimate the gradients. In practice this entails joining the activations and the lables, using `nn.JoinTable(1,1)`, and then having a simple linear map, using `nn.Linear(256+10,256)`. This astonishingly simple gradient estimate seems to do the trick. 
 
-This result is closest to the result in the 3-layer FCN  cDNI model reported in the first row, fourth column of Table 1 in the paper.
+This result is closest to the result in the 3-layer FCN cDNI model reported in the first row, fourth column of Table 1 in the paper.
 
 If we run with a batch size of 250 and a learning rate of 0.001:
 
     ./dni-mnist.lua -b 250 -f -r 0.001 -c
 
-We get an error rate of 2.0% by epoch 96 (2.8% error by epoch 23). This corresponds to 230k iterations and 55k iterations respectively. This seems to be converging substantially slower than the equivalent cDNI model in the paper (red line in figure next to Table 1).
+We get an error rate of 2.0% by epoch 96 (2.8% error by epoch 23). I believe this corresponds to 230k iterations and 55k iterations respectively. This seems to be converging substantially slower than the equivalent cDNI model in the paper (red line in figure next to Table 1).
+
+## Remarks
+
+0. The synthetic gradients seem to act as a strong regularizer, which seems a good thing.
+0. For simple feed-forward models like those in these experiments, there is really no point of using synthetic gradients, nor it this their intended purpose. These demos are just to illustrate how they are implemented.
+0. Synthetic gradients seem to open up a huge world of elaborate architectures composed of asynchronous, decoupled subsystems. That they can be decoupled seems to make such subsystems much more easily composable. It will be interesting to see where this path leads.
 
 ## Notes
 
