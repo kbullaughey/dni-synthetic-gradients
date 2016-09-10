@@ -21,6 +21,7 @@ local opt = lapp[[
   -s,--save          (default "logs")      subdirectory to save logs
   -f,--full                                use the full dataset
   -p,--plot                                plot while training
+  -c,--condition                           condition synthetic gradients on labels
   -r,--learningRate  (default 0.05)        learning rate
   -b,--batchSize     (default 10)          batch size
   -m,--momentum      (default 0)           momentum
@@ -59,41 +60,62 @@ predictions = nn.Sequential()
 
 -- Layer sizes. 
 l0H = 1024
-l1H = 256
-l2H = 256
+l1H = 384
+l2H = 384
 s1H = 1024
 s2H = 1024
 
+-- BatchNormalization parameters
+bnMomentum = 0.25
 ------------------------------------------------------------
 -- 2 hidden layers
 ------------------------------------------------------------
 -- Activations for layer 1
 activations1:add(nn.Reshape(l0H))
 activations1:add(nn.Linear(l0H, l1H))
-activations1:add(nn.BatchNormalization(l1H, nil, nil, false))
+activations1:add(nn.BatchNormalization(l1H, nil, bnMomentum, false))
 activations1:add(nn.ReLU())
 -- Activations for layer 2
 activations2:add(nn.Linear(l1H, l2H))
-activations2:add(nn.BatchNormalization(l2H, nil, nil, false))
+activations2:add(nn.BatchNormalization(l2H, nil, bnMomentum, false))
 activations2:add(nn.ReLU())
--- Synthetic gradients for layer 1
-synthetic1:add(nn.Linear(l1H,s1H))
-synthetic1:add(nn.BatchNormalization(s1H, nil, nil, false))
-synthetic1:add(nn.ReLU())
-synthetic1:add(nn.Linear(s1H,s1H))
-synthetic1:add(nn.BatchNormalization(s1H, nil, nil, false))
-synthetic1:add(nn.ReLU())
-synth1Pred = nn.Linear(s1H,l1H)
+
+-- If using the conditioning on labels (cDNI) then we tack these
+-- on to the activations. When conditioning we model the gradient with
+-- a simple linear transform (0-layer neural net). When not conditioning
+-- on labels, we use a much more capable, 2-layer neural net.
+if opt.condition then
+  print("conditioning on labels (i.e., cDNI)")
+  s1In = l1H + #classes
+  s2In = l2H + #classes
+  -- Synthetic gradients for layer 1, activations joined with labels
+  synthetic1:add(nn.JoinTable(1,1))
+  synth1Pred = nn.Linear(l1H+#classes,l1H)
+  -- Synthetic gradients for layer 2, activations joined with labels
+  synthetic2:add(nn.JoinTable(1,1))
+  synth2Pred = nn.Linear(l2H+#classes,l2H)
+else
+  -- Synthetic gradients for layer 1
+  synthetic1:add(nn.Linear(s1In,s1H))
+  synthetic1:add(nn.BatchNormalization(s1H, nil, bnMomentum, false))
+  synthetic1:add(nn.ReLU())
+  synthetic1:add(nn.Linear(s1H,s1H))
+  synthetic1:add(nn.BatchNormalization(s1H, nil, bnMomentum, false))
+  synthetic1:add(nn.ReLU())
+  synth1Pred = nn.Linear(s1H,l1H)
+  -- Synthetic gradients for layer 2
+  synthetic2:add(nn.Linear(s2In,s2H))
+  synthetic2:add(nn.BatchNormalization(s2H, nil, bnMomentum, false))
+  synthetic2:add(nn.ReLU())
+  synthetic2:add(nn.Linear(s2H,s2H))
+  synthetic2:add(nn.BatchNormalization(s2H, nil, bnMomentum, false))
+  synthetic2:add(nn.ReLU())
+  synth2Pred = nn.Linear(s2H,l2H)
+end
+
 synthetic1:add(synth1Pred)
--- Synthetic gradients for layer 2
-synthetic2:add(nn.Linear(l2H,s2H))
-synthetic2:add(nn.BatchNormalization(s2H, nil, nil, false))
-synthetic2:add(nn.ReLU())
-synthetic2:add(nn.Linear(s2H,s2H))
-synthetic2:add(nn.BatchNormalization(s2H, nil, nil, false))
-synthetic2:add(nn.ReLU())
-synth2Pred = nn.Linear(s2H,l2H)
 synthetic2:add(synth2Pred)
+
 -- Predictions
 predictions:add(nn.Linear(l2H,#classes))
 predictions:add(nn.LogSoftMax())
@@ -107,15 +129,16 @@ synthetic2Par, synthetic2GradPar = synthetic2:getParameters()
 predictionsPar, predictionsGradPar = predictions:getParameters()
 
 -- Initialize parameters
-activations1Par:uniform(-0.05, 0.05)
-activations2Par:uniform(-0.05, 0.05)
-synthetic1Par:uniform(-0.05, 0.05)
+r = 0.07
+activations1Par:uniform(-r, r)
+activations2Par:uniform(-r, r)
+synthetic1Par:uniform(-r, r)
 synth1Pred.weight:zero()
 synth1Pred.bias:zero()
-synthetic2Par:uniform(-0.05, 0.05)
+synthetic2Par:uniform(-r, r)
 synth2Pred.weight:zero()
 synth2Pred.bias:zero()
-predictionsPar:uniform(-0.05, 0.05)
+predictionsPar:uniform(-r, r)
 
 ----------------------------------------------------------------------
 -- We use a negative log likelihood criterion for classification model
@@ -185,7 +208,11 @@ function makeActivationsClosure(this)
     -- Use the activations from the layer below to compute the activations of this layer.
     this.act = this.activations:forward(this.below.act)
     -- use the synthetic gradients model to approximate df_do
-    this.synGrad = this.synthetic:forward(this.act)
+    if opt.condition then
+      this.synGrad = this.synthetic:forward({this.act,this.labels})
+    else
+      this.synGrad = this.synthetic:forward(this.act)
+    end
     -- No update locking, we can immediately use our synthetic gradients to 
     -- run this module backward.
     this.below.bpGrad = this.activations:backward(this.below.act, this.synGrad)
@@ -210,7 +237,11 @@ function makeSyntheticGradientClosure(this)
     -- Compute a loss comparing our synthetic gradient and the real gradient.
     local synLoss = syntheticCriterion:forward(this.synGrad, this.bpGrad)
     local synLossGrad = syntheticCriterion:backward(this.synGrad, this.bpGrad)
-    this.synthetic:backward(this.act, synLossGrad)
+    if opt.condition then
+      this.synthetic:backward({this.act,this.labels}, synLossGrad)
+    else
+      this.synthetic:backward(this.act, synLossGrad)
+    end
 
     -- return f and df/dW
     return synLoss, this.syntheticGradPar
@@ -282,6 +313,14 @@ function train(dataset)
       k = k + 1
     end
 
+    local batchLabels
+    if opt.condition then
+      batchLabels = torch.zeros(opt.batchSize, #classes)
+      for i=1,opt.batchSize do
+        batchLabels[i][targets[i]] = 1
+      end
+    end
+
     local layer0 = {
       act = inputs,
     }
@@ -311,6 +350,12 @@ function train(dataset)
       predictionsGradPar = predictionsGradPar,
       below = layer2,
     }
+
+    -- We provide the labels to the synthetic gradient modules if using cDNI.
+    if opt.condition then
+      layer1.labels = batchLabels
+      layer2.labels = batchLabels
+    end
 
     local fEvalActivations1 = makeActivationsClosure(layer1)
     local fEvalActivations2 = makeActivationsClosure(layer2)
