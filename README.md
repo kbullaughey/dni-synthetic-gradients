@@ -29,7 +29,7 @@ And the `feval` function has forward/backward steps corresponding to the above 4
 
 For decoupled neural interfaces, we can perform the updates in an unlocked fashion as soon as the (synthetic) gradient becomes available. One way this can be done is with 5 updates of the optimizer, each working on a smaller piece of the model (i.e., one layer or one synthetic gradient model).
 
-Thus perform 5 updates to parameters each minibatch. Each update is accomplished with a call to `optim.adam(f, par, state)`. The following notation corresponds to Figure 2 in the DNI paper but I use ^δ to refer to the synthetic gradient estimate of δ.
+Thus we perform 5 updates to parameters each minibatch. Each update is accomplished with a call to `optim.adam(f, par, state)`. The following notation corresponds to Figure 2 in the DNI paper but I use ^δ to refer to the synthetic gradient estimate of δ.
 
 1. Update 1:
     1. Evaluate f<sub>i</sub>
