@@ -77,9 +77,9 @@ For the synthetic gradients, I follow the paper and use a neural network with tw
 
 Using a batch size of 250 and a learning rate of 0.0001:
 
-    ./dni-mnist.lua -b 250 -f -r 0.0001 -s dni
+    ./dni-mnist.lua -b 250 -f -r 0.0001
 
-I only managed to reach an error rate of X% after Y epochs.
+I only managed to reach an error rate of 2.8% after 249 epochs (or 60k iterations) and even by 770 epochs (185k iterations) it still hadn't gotten below 2.7% error.
 
 The learning rate above (0.0001) is 3x the rate reported in the paper. But decreasing it didn't seem to help. It's worth noting that I was able to use a learning rate 10x higher yet (0.001) when conditioning on the labels (cDNI model). Such a high learning rate trained poorly for the unconditional model here. This probably relates to the very low amount of information in the synthetic gradients when not conditioning on the labels. My theory is that the unconditional synthetic gradient model is tasked with making both a rough prediction of the class as well as modeling how the activations should be updated given this prediction. This seems like a lot to expect from the synthetic gradient neural net.
 
@@ -96,14 +96,13 @@ If we run with a batch size of 250 and a learning rate of 0.001:
 
     ./dni-mnist.lua -b 250 -f -r 0.001 -c
 
-We get an error rate of 2.0% by epoch 96 (2.8% error by epoch 23). I believe this corresponds to 230k iterations and 55k iterations respectively. This seems to be converging substantially slower than the equivalent cDNI model in the paper (red line in figure next to Table 1).
+We get an error rate of 2.0% by epoch 80. I believe this corresponds to 19k iterations. This seems to be converging somewhat slower than the equivalent cDNI model in the paper (red line in figure next to Table 1).
 
 ## Remarks
 
 0. The synthetic gradients seem to act as a strong regularizer, which seems a good thing.
 0. For simple feed-forward models like those in these experiments, there is really no point of using synthetic gradients, nor it this their intended purpose. These demos are just to illustrate how they are implemented.
 0. Synthetic gradients seem to open up a huge world of elaborate architectures composed of asynchronous, decoupled subsystems. That they can be decoupled seems to make such subsystems much more easily composable. It will be interesting to see where this path leads.
-0. The slow poor convergence I observe relative to the paper suggests there may be something I'm missing or a bug. 
 
 ## Notes
 

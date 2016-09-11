@@ -60,8 +60,8 @@ predictions = nn.Sequential()
 
 -- Layer sizes. 
 l0H = 1024
-l1H = 384
-l2H = 384
+l1H = 256
+l2H = 256
 s1H = 1024
 s2H = 1024
 
