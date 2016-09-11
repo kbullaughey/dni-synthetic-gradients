@@ -103,6 +103,7 @@ We get an error rate of 2.0% by epoch 80. I believe this corresponds to 19k iter
 0. The synthetic gradients seem to act as a strong regularizer, which seems a good thing.
 0. For simple feed-forward models like those in these experiments, there is really no point of using synthetic gradients, nor it this their intended purpose. These demos are just to illustrate how they are implemented.
 0. Synthetic gradients seem to open up a huge world of elaborate architectures composed of asynchronous, decoupled subsystems. That they can be decoupled seems to make such subsystems much more easily composable. It will be interesting to see where this path leads.
+0. My guess as to why synthetic gradients conditioning on labels (cDNI) are so good at learning deep nets with many layers (up to 21 layers as reported in the paper) is that it has more to do with conditioning on the labels than the fact they're using synthetic gradients. Conditioning on the gradients probably is acting like skip connections or something.
 
 ## Notes
 
