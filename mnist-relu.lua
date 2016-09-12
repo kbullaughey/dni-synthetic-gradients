@@ -166,7 +166,7 @@ function train(dataset)
          learningRate = opt.learningRate,
          momentum = opt.momentum,
          learningRateDecay = 5e-7,
-         weightDecayDecay = opt.coefL2,
+         weightDecay = opt.coefL2,
       }
       optim.sgd(feval, parameters, sgdState)
    
