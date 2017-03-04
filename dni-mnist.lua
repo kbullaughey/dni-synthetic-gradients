@@ -266,7 +266,7 @@ function makePredictionsClosure(this)
     local df_do = classificationCriterion:backward(outputs, this.targets)
     -- Compute the actual gradient. This will be compared against the synthetic
     -- gradient to update the model that outputs the synthetic gradients.
-    this.below.bpGrad = this.predictions:backward(this.below.act, df_do):clone()
+    this.below.bpGrad = this.predictions:backward(this.below.act, df_do)
 
     -- update confusion
     for i = 1,opt.batchSize do
@@ -280,11 +280,6 @@ end
 
 -- training function
 function train(dataset)
-  activations1:training()
-  activations2:training()
-  synthetic1:training()
-  synthetic2:training()
-  predictions:training()
 
   -- epoch tracker
   epoch = epoch or 1
@@ -415,9 +410,6 @@ end
 
 -- test function
 function test(dataset)
-  activations1:evaluate()
-  activations2:evaluate()
-  predictions:evaluate()
 
   -- local vars
   local time = sys.clock()
